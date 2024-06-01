@@ -14,14 +14,14 @@ recipient_addresses = [
 load_dotenv()
 
 # Settings
-SENDING_TIMEOUT = 0.5  # timeout between each transaction, 0 - without timeout(instantly)
+SENDING_TIMEOUT = 1  # timeout between each transaction, 0 - without timeout(instantly)
 RETRY_TIMEOUT = 3 # timeout between each retry if trans was failure
 MAX_RETRIES = 5  # maximum number of retries
 
 SEND_AMOUNT = 0.000001  # amount
 NUM_TRANSACTIONS = 1000  # transaction count
 GAS_LIMIT = 21000  # gas limit
-GAS_PRICE = int(1 * 10**9)  # 1 Gwei in wei
+GAS_PRICE = int(2 * 10**9)  # 1 Gwei in wei
 
 
 RPC_URL = 'https://rpc-testnet.unit0.dev'
@@ -35,6 +35,20 @@ if not SENDER_ADDRESS or not PRIVATE_KEY:
     print("Error: SENDER_ADDRESS and PRIVATE_KEY environment variables must be set.")
     exit(1)
 
+def request_with_retries(data, retries=15, delay=3):
+    for attempt in range(retries):
+        try:
+            response = requests.post(RPC_URL, json=data)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"HTTP error: {e}")
+            if attempt < retries - 1:
+                print(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                raise
+
 def check_balance(address):
     data = {
         "jsonrpc": "2.0",
@@ -43,21 +57,15 @@ def check_balance(address):
         "id": 1
     }
     try:
-        response = requests.post(RPC_URL, json=data)
-        response.raise_for_status()  # Raise an exception for HTTP errors
-        response_json = response.json()
+        response_json = request_with_retries(data)
         if "result" in response_json:
             balance = int(response_json["result"], 16)
             return decimal.Decimal(balance) / 10**18
         else:
             print(f"Unexpected response format: {response_json}")
             raise Exception("No result field in JSON response")
-    except requests.exceptions.RequestException as e:
-        print(f"HTTP error: {e}")
-        raise
-    except ValueError as e:
-        print(f"JSON decoding error: {e}")
-        print(f"Response content: {response.text}")
+    except Exception as e:
+        print(f"Error checking balance: {e}")
         raise
 
 def get_random_recipient_address():
@@ -70,8 +78,8 @@ def get_nonce(address):
         "params": [address, "pending"],
         "id": 1
     }
-    response = requests.post(RPC_URL, json=data).json()
-    return int(response["result"], 16)
+    response_json = request_with_retries(data)
+    return int(response_json["result"], 16)
 
 def send_transaction(nonce, recipient_address):
     tx = {
@@ -93,11 +101,11 @@ def send_transaction(nonce, recipient_address):
         "id": 1
     }
 
-    response = requests.post(RPC_URL, json=data).json()
-    if "result" in response:
-        return response["result"]
+    response_json = request_with_retries(data)
+    if "result" in response_json:
+        return response_json["result"]
     else:
-        print(response)
+        print(response_json)
         raise Exception("No transaction hash received.")
 
 def check_transaction_status(tx_hash, transaction_number):
