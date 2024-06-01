@@ -105,8 +105,7 @@ def send_transaction(nonce, recipient_address):
     if "result" in response_json:
         return response_json["result"]
     else:
-        print(response_json)
-        raise Exception("No transaction hash received.")
+        raise Exception(response_json["error"]["message"])
 
 def check_transaction_status(tx_hash, transaction_number):
     tx_receipt = None
