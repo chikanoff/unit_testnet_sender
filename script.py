@@ -1,5 +1,5 @@
-import os
 import time
+import os
 import random
 import decimal
 import requests
@@ -13,100 +13,140 @@ recipient_addresses = [
 
 load_dotenv()
 
-# Настройки
-RPC_URL = 'https://rpc-testnet.unit0.dev'
-CHAIN_ID = 88817
-SEND_AMOUNT = 0.00001  # amount in ETH
-SENDER_ADDRESS = os.getenv("SENDER_ADDRESS")  # real address of sender!!
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")  # real private key of sender!!
+# Settings
+SENDING_TIMEOUT = 0.5  # timeout between each transaction, 0 - without timeout(instantly)
+RETRY_TIMEOUT = 3 # timeout between each retry if trans was failure
+MAX_RETRIES = 5  # maximum number of retries
+
+SEND_AMOUNT = 0.000001  # amount
 NUM_TRANSACTIONS = 1000  # transaction count
 GAS_LIMIT = 21000  # gas limit
-GAS_PRICE = int(1.2 * 10**9)  # gas price in wei (1.2 gwei)
+GAS_PRICE = int(1 * 10**9)  # 1 Gwei in wei
+
+
+RPC_URL = 'https://rpc-testnet.unit0.dev'
+CHAIN_ID = 88817
+
+SENDER_ADDRESS = os.getenv("SENDER_ADDRESS")  # real address of sender!!
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")  # real private key of sender!!
+
+# Check if SENDER_ADDRESS and PRIVATE_KEY are set
+if not SENDER_ADDRESS or not PRIVATE_KEY:
+    print("Error: SENDER_ADDRESS and PRIVATE_KEY environment variables must be set.")
+    exit(1)
 
 def check_balance(address):
-    response = requests.post(RPC_URL, json={
+    data = {
         "jsonrpc": "2.0",
         "method": "eth_getBalance",
         "params": [address, "latest"],
         "id": 1
-    })
-    balance = int(response.json()['result'], 16)
-    return decimal.Decimal(balance) / 10**18
+    }
+    try:
+        response = requests.post(RPC_URL, json=data)
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        response_json = response.json()
+        if "result" in response_json:
+            balance = int(response_json["result"], 16)
+            return decimal.Decimal(balance) / 10**18
+        else:
+            print(f"Unexpected response format: {response_json}")
+            raise Exception("No result field in JSON response")
+    except requests.exceptions.RequestException as e:
+        print(f"HTTP error: {e}")
+        raise
+    except ValueError as e:
+        print(f"JSON decoding error: {e}")
+        print(f"Response content: {response.text}")
+        raise
 
 def get_random_recipient_address():
     return random.choice(recipient_addresses)
 
+def get_nonce(address):
+    data = {
+        "jsonrpc": "2.0",
+        "method": "eth_getTransactionCount",
+        "params": [address, "pending"],
+        "id": 1
+    }
+    response = requests.post(RPC_URL, json=data).json()
+    return int(response["result"], 16)
+
 def send_transaction(nonce, recipient_address):
-    transaction = {
+    tx = {
         'nonce': nonce,
         'to': recipient_address,
-        'value': int(SEND_AMOUNT * 10**18),
-        'gas': GAS_LIMIT,
-        'gasPrice': GAS_PRICE,
+        'value': hex(int(SEND_AMOUNT * 10**18)),
+        'gas': hex(GAS_LIMIT),
+        'gasPrice': hex(GAS_PRICE),
         'chainId': CHAIN_ID
     }
 
-    signed_txn = Account.sign_transaction(transaction, PRIVATE_KEY)
-    tx_data = signed_txn.rawTransaction.hex()
+    signed_tx = Account.sign_transaction(tx, PRIVATE_KEY)
+    tx_data = signed_tx.rawTransaction.hex()
 
-    response = requests.post(RPC_URL, json={
+    data = {
         "jsonrpc": "2.0",
         "method": "eth_sendRawTransaction",
         "params": [tx_data],
         "id": 1
-    })
-    return response.json().get('result')
+    }
+
+    response = requests.post(RPC_URL, json=data).json()
+    if "result" in response:
+        return response["result"]
+    else:
+        print(response)
+        raise Exception("No transaction hash received.")
 
 def check_transaction_status(tx_hash, transaction_number):
     tx_receipt = None
     while tx_receipt is None:
         try:
-            response = requests.post(RPC_URL, json={
+            data = {
                 "jsonrpc": "2.0",
                 "method": "eth_getTransactionReceipt",
                 "params": [tx_hash],
                 "id": 1
-            })
-            tx_receipt = response.json()['result']
-            if tx_receipt is None:
-                time.sleep(2)
-            else:
+            }
+            response = requests.post(RPC_URL, json=data).json()
+            tx_receipt = response["result"]
+            if tx_receipt:
                 print(f"{transaction_number} transaction receipt received")
+            else:
+                print(f"Waiting for transaction {transaction_number} to be mined...")
+                time.sleep(3)
         except Exception as e:
-            print(f"Waiting for transaction {transaction_number} to be mined...")
+            print(f"Exc: {e}")
             time.sleep(2)
     return tx_receipt
 
-nonce_response = requests.post(RPC_URL, json={
-    "jsonrpc": "2.0",
-    "method": "eth_getTransactionCount",
-    "params": [SENDER_ADDRESS, "latest"],
-    "id": 1
-})
-nonce = int(nonce_response.json()['result'], 16)
-
-for i in range(1, NUM_TRANSACTIONS + 1):
-    balance = check_balance(SENDER_ADDRESS)
-    required_amount = decimal.Decimal(SEND_AMOUNT) + decimal.Decimal(GAS_LIMIT) * decimal.Decimal(GAS_PRICE) / 10**18
-    if balance < required_amount:
-        print(f"Not enough balance for transaction {i}. Current balance: {balance} ETH")
-        break
-
-    recipient_address = get_random_recipient_address()
-
-    try:
-        tx_hash = send_transaction(nonce, recipient_address)
-        if tx_hash:
-            print(f"Transaction {i} sent. Nonce: {nonce}, Hash: {tx_hash}")
-            receipt = check_transaction_status(tx_hash, i)
-            if receipt and receipt['status'] == '0x1':
-                print(f"Transaction {i} was successful")
-            else:
-                print(f"Transaction {i} failed")
-            nonce += 1
-        else:
-            print(f"Error sending transaction {i}: No transaction hash received.")
+def main():
+    for i in range(1, NUM_TRANSACTIONS + 1):
+        balance = check_balance(SENDER_ADDRESS)
+        required_amount = decimal.Decimal(SEND_AMOUNT) + decimal.Decimal(GAS_LIMIT) * decimal.Decimal(GAS_PRICE) / 10**18
+        if balance < required_amount:
+            print(f"Not enough balance for transaction {i}.Required balance: {required_amount}, Current balance: {balance}.")
             break
-    except Exception as e:
-        print(f"Error sending transaction {i}: {e}. Nonce: {nonce}")
-        break
+
+        recipient_address = get_random_recipient_address()
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                nonce = get_nonce(SENDER_ADDRESS)
+                tx_hash = send_transaction(nonce, recipient_address)
+                print(f"Transaction {i} sent. Nonce: {nonce}. Hash: {tx_hash}")
+                time.sleep(SENDING_TIMEOUT)
+                break
+            except Exception as e:
+                print(f"Error sending transaction {i} (attempt {attempt + 1}): {e}. Nonce: {nonce}")
+                if attempt < MAX_RETRIES - 1:
+                    print(f"Retrying transaction {i}...")
+                    time.sleep(SENDING_TIMEOUT)
+                else:
+                    print(f"Max retries reached for transaction {i}.")
+                    return
+
+if __name__ == "__main__":
+    main()
